@@ -17,10 +17,12 @@ from point_util import *
 from base_model_util import *
 import pointnet2_model_api as PN2
 from pointnet2_ops.pointnet2_utils import QueryAndGroup
-# from avg_shape_2.avg_shape_1 import Model as Model_WSLoss
+# 从 avg_shape_2.avg_shape_1 导入 Model（未使用）
 
 
 class STA_G(nn.Module):
+    """生成器网络"""
+
     def __init__(self, cfg=None):
         super().__init__()
         self.cfg = cfg
@@ -42,6 +44,7 @@ class STA_G(nn.Module):
 
     
     def get_mirror(self, point, ab):
+        """根据参数生成镜像点"""
         __e = 1e-8
         A, B = torch.split(ab, [1, 1], 1)
 
@@ -59,21 +62,22 @@ class STA_G(nn.Module):
 
 
     def upsampling_refine(self, point):
-        #### encode feature ####
+        """上采样并细化点云"""
+        #### 编码特征 ####
         B, N, _ = point.shape
         x = self.mlp_refine_1(point.permute(0, 2, 1))
         x_max = torch.max(x, 2, keepdim=True).values
         x = self.mlp_refine_2(torch.cat([x, x_max.repeat([1, 1, N])], 1))
-        x_local = self.qg(point, point, x)[:,3:,:,:]        # [B, 256, 512, 32]
-        x_local = torch.max(x_local, -1).values                           # [B, 256, 512]
+        x_local = self.qg(point, point, x)[:,3:,:,:]        # 形状 [B, 256, 512, 32]
+        x_local = torch.max(x_local, -1).values                           # 形状 [B, 256, 512]
         x = self.mlp_refine_3(torch.cat([x, x_local], 1))
         x_max = torch.max(x, -1, keepdim=True).values
 
-        #### upsampling refine ####      
+        #### 上采样细化 ####
         x = torch.cat([point.permute(0, 2, 1), x, x_max.repeat([1, 1, N])], 1)
         shift = self.mlp_refine_4(x)
 
-        #### shift ####
+        #### 偏移操作 ####
         res = torch.unsqueeze(point, 2).repeat([1, 1, self.UPN, 1])
         res = torch.reshape(res, [B, -1, 3])
         shift = shift.permute(0, 2, 1).reshape([B, -1, 3])
@@ -82,6 +86,7 @@ class STA_G(nn.Module):
         return res
     
     def mi_sam(self, point, ab):
+        """融合镜像点的采样"""
         N = point.shape[1]
         point_M = self.get_mirror(point, ab)
         point = torch.cat([point, point_M], 1)
@@ -89,6 +94,7 @@ class STA_G(nn.Module):
         return point
 
     def forward(self, input_R, input_A):
+        """前向传播"""
         B, N, _ = input_R.shape
 
         f_R_0 = self.E_R(input_R)
@@ -101,7 +107,7 @@ class STA_G(nn.Module):
         input_R_point_R_0 = torch.cat([input_R, input_R_M, point_R_0], 1)
         input_R_point_R_0 = PN2.FPS(input_R_point_R_0, 2048)
 
-        #### autoencoding ####
+        #### 自编码 ####
 
         x = torch.cat([input_R_point_R_0, input_A], 0)
         x = self.E_A(x)
@@ -123,12 +129,15 @@ class STA_G(nn.Module):
 
 
 class PointDIS(nn.Module):
+    """点云判别器"""
+
     def __init__(self):
         super().__init__()
         self.encoder = PcnEncoder2(out_c=256)
         self.mlp = MlpConv(256, [64, 64, 1])
-    
+
     def forward(self, point):
+        """输出点云真实度评分"""
         d_p = self.encoder(point)
         d_p = self.mlp(d_p)
         d_p = torch.sigmoid(d_p)
@@ -137,18 +146,22 @@ class PointDIS(nn.Module):
 
 
 class STA_D(nn.Module):
+    """判别器网络"""
+
     def __init__(self):
         super().__init__()
         self.d_f = MlpConv(512, [64, 64, 1])
         self.d_p = PointDIS()
-    
+
     def discriminate_feature(self, f):
+        """对特征进行判别"""
         d_f = self.d_f(f)
         d_f = torch.sigmoid(d_f)
         d_f = d_f[:,0,0]
         return d_f
-    
+
     def forward(self, f_R, f_A, input_R_point_R_0, point_R_3, input_A):
+        """判别器前向传播"""
         B = f_R.shape[0]
         f = torch.cat([f_R, f_A], 0)
         d_f = self.discriminate_feature(f)
@@ -161,6 +174,8 @@ class STA_D(nn.Module):
 
 
 class STA(nn.Module):
+    """STA 模型"""
+
     def __init__(self, dis=0.03, cfg=None):
         super().__init__()
         self.cfg = cfg
@@ -169,8 +184,9 @@ class STA(nn.Module):
         self.D = STA_D()
         self.loss = STALoss()
         self.loss_test = STALoss_test()
-    
+
     def forward(self, data):
+        """整体前向流程"""
         rc_data, sn_data = data
         input_R = rc_data[0]
         input_A = sn_data[0]
@@ -184,29 +200,34 @@ class STA(nn.Module):
 
 
 class STALoss(BasicLoss):
+    """训练阶段的损失计算"""
+
     def __init__(self):
         super().__init__()
         self.loss_name = ['loss_g', 'loss_d', 'g_fake_loss', 'g_rsl_2', 'g_rsl_2', 'g_fsl_3', 'density_loss', 'd_fake_loss', 'd_real_loss']
         self.loss_num = len(self.loss_name)
         self.distance = ChamferDistance()
-    
+
     def cd(self, p1, p2):
+        """计算 Chamfer 距离"""
         p2g, g2p = self.distance(p1, p2)
         p2g = torch.mean(p2g, 1)
         g2p = torch.mean(g2p, 1)
         cd = p2g + g2p
         return cd, p2g, g2p
-    
+
     def density_loss(self, x):
+        """基于点云密度的损失"""
         x1 = x.unsqueeze(1)
         x2 = x.unsqueeze(2)
         diff = (x1-x2).norm(dim=-1)
         diff, idx = diff.topk(16, largest=False)
-        # print(idx.shape)
+        # 打印 idx 的形状
         loss = diff[:,:,1:].mean(2).std(1)
         return loss
-    
+
     def batch_forward(self, outputs, data):
+        """批量计算损失"""
         __E = 1e-8
         point_R, point_R_3, point_A, point_A_3, input_R_point_R_0, \
         d_f_R, d_f_A, d_p_R, d_p_R_3, d_p_A, \
@@ -234,13 +255,16 @@ class STALoss(BasicLoss):
 
 
 class STALoss_test(BasicLoss):
+    """测试阶段的损失计算"""
+
     def __init__(self):
         super().__init__()
         self.loss_name = ['cd', 'fcd_0p001', 'fcd_0p01', 'den_loss']
         self.loss_num = len(self.loss_name)
         self.distance = ChamferDistance()
-    
+
     def cd1(self, p1, p2):
+        """计算 L2 范数的 Chamfer 距离"""
         p2g, g2p = self.distance(p1, p2)
         p2g = torch.sqrt(p2g)
         g2p = torch.sqrt(g2p)
@@ -250,6 +274,7 @@ class STALoss_test(BasicLoss):
         return cd
 
     def cd2(self, p1, p2):
+        """计算平方形式的 Chamfer 距离"""
         p2g, g2p = self.distance(p1, p2)
         p2g = torch.mean(p2g, 1)
         g2p = torch.mean(g2p, 1)
@@ -257,6 +282,7 @@ class STALoss_test(BasicLoss):
         return cd
 
     def density_loss(self, x):
+        """计算密度损失"""
         x1 = x.unsqueeze(1)
         x2 = x.unsqueeze(2)
         diff = (x1-x2).norm(dim=-1)
@@ -265,9 +291,10 @@ class STALoss_test(BasicLoss):
         mean = loss.mean(1)
         loss = loss.std(1)
         return loss, mean
-    
+
 
     def batch_forward(self, outputs, data):
+        """测试阶段前向"""
         __E = 1e-8
         point_R, point_R_3, point_A, point_A_3, input_R_point_R_0, \
         d_f_R, d_f_A, d_p_R, d_p_R_3, d_p_A, \
@@ -278,10 +305,10 @@ class STALoss_test(BasicLoss):
         cd = self.cd1(point_R_3, gt)
         fcd_0p001 = calc_fcd(point_R_3, gt, a=0.001)
         fcd_0p01 = calc_fcd(point_R_3, gt, a=0.01)
-        
+
         den_loss, mean = self.density_loss(point_R_3)
 
-        return [cd, fcd_0p001, fcd_0p01, den_loss]    
+        return [cd, fcd_0p001, fcd_0p01, den_loss]
 
 if __name__ == '__main__':
     model = STA()
