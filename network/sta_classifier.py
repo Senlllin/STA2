@@ -20,9 +20,10 @@ from pointnet2_ops.pointnet2_utils import QueryAndGroup
 # from avg_shape_2.avg_shape_1 import Model as Model_WSLoss
 
 
-class USSPA_G(nn.Module):
-    def __init__(self):
+class STA_G(nn.Module):
+    def __init__(self, cfg=None):
         super().__init__()
+        self.cfg = cfg
         self.GPN = 512
         self.E_R = PcnEncoder2(out_c=512)
         self.E_A = PcnEncoder2(out_c=512)
@@ -79,7 +80,7 @@ class USSPA_G(nn.Module):
         res = res + shift
 
         return res
-    
+
     def mi_sam(self, point, ab):
         N = point.shape[1]
         point_M = self.get_mirror(point, ab)
@@ -117,34 +118,33 @@ class USSPA_G(nn.Module):
         other.append(point_R_0)
         other.append(input_R_M)
 
-
         return f_R, f_A, point_R, point_R_3, point_A, point_A_3, input_R_point_R_0, other
 
 
 class PointDIS(nn.Module):
-    def __init__(self):
+    def __init__(self, class_num):
         super().__init__()
+        self.class_num = class_num
         self.encoder = PcnEncoder2(out_c=256)
-        self.mlp = MlpConv(256, [64, 64, 1])
+        self.mlp = MlpConv(256, [64, 64, class_num+1])
     
     def forward(self, point):
         d_p = self.encoder(point)
         d_p = self.mlp(d_p)
-        d_p = torch.sigmoid(d_p)
-        d_p = d_p[:,0,0]
+        d_p = d_p[:,:,0]
         return d_p
 
 
-class USSPA_D(nn.Module):
-    def __init__(self):
+class STA_D(nn.Module):
+    def __init__(self, class_num):
         super().__init__()
-        self.d_f = MlpConv(512, [64, 64, 1])
-        self.d_p = PointDIS()
+        self.class_num = class_num
+        self.d_f = MlpConv(512, [64, 64, class_num+1])
+        self.d_p = PointDIS(class_num)
     
     def discriminate_feature(self, f):
         d_f = self.d_f(f)
-        d_f = torch.sigmoid(d_f)
-        d_f = d_f[:,0,0]
+        d_f = d_f[:,:,0]
         return d_f
     
     def forward(self, f_R, f_A, input_R_point_R_0, point_R_3, input_A):
@@ -159,34 +159,49 @@ class USSPA_D(nn.Module):
         return d_f_R, d_f_A, d_p_R, d_p_R_3, d_p_A
 
 
-class USSPA(nn.Module):
-    def __init__(self, dis = 0.03):
+class STA(nn.Module):
+    def __init__(self, class_dict, cfg=None):
         super().__init__()
-        self.G = USSPA_G()
+        self.class_dict = class_dict
+        self.class_num = len(list(self.class_dict.keys()))
+        self.cfg = cfg
 
-        self.D = USSPA_D()
-        self.loss = USSPALoss()
-        self.loss_test = USSPALoss_test()
+        self.G = STA_G(cfg)
+        self.D = STA_D(self.class_num)
+
+        self.loss = STALoss()
+        self.loss_test = STALoss_test()
     
     def forward(self, data):
         rc_data, sn_data = data
         input_R = rc_data[0]
         input_A = sn_data[0]
 
+        input_R_label = rc_data[-1]
+        input_A_label = sn_data[-1]
+        input_R_label = [self.class_dict[x]+1 for x in input_R_label]
+        input_A_label = [self.class_dict[x]+1 for x in input_A_label]
+        input_R_label = torch.from_numpy(np.array(input_R_label)).cuda().long()
+        input_A_label = torch.from_numpy(np.array(input_A_label)).cuda().long()
+
         f_R, f_A, point_R, point_R_3, point_A, point_A_3, input_R_point_R_0, other = self.G(input_R, input_A)
         d_f_R, d_f_A, d_p_R, d_p_R_3, d_p_A = self.D(f_R, f_A, input_R_point_R_0, point_R_3, input_A)
+
+        other.append(input_R_label)
+        other.append(input_A_label)
 
         return point_R, point_R_3, point_A, point_A_3, input_R_point_R_0, \
             d_f_R, d_f_A, d_p_R, d_p_R_3, d_p_A, \
             input_R, input_A, other
 
 
-class USSPALoss(BasicLoss):
+class STALoss(BasicLoss):
     def __init__(self):
         super().__init__()
         self.loss_name = ['loss_g', 'loss_d', 'g_fake_loss', 'g_rsl_2', 'g_rsl_2', 'g_fsl_3', 'density_loss', 'd_fake_loss', 'd_real_loss']
         self.loss_num = len(self.loss_name)
         self.distance = ChamferDistance()
+        self.class_loss = nn.CrossEntropyLoss(reduction='none')
     
     def cd(self, p1, p2):
         p2g, g2p = self.distance(p1, p2)
@@ -200,19 +215,29 @@ class USSPALoss(BasicLoss):
         x2 = x.unsqueeze(2)
         diff = (x1-x2).norm(dim=-1)
         diff, idx = diff.topk(16, largest=False)
-        # print(idx.shape)
         loss = diff[:,:,1:].mean(2).std(1)
         return loss
     
+    def calc_g_fake_loss(self, d):
+        __E = 1e-8
+        d = torch.softmax(d, -1)
+        d = d[:, 0]
+        res = -torch.log(1-d+__E)
+        return res
+
     def batch_forward(self, outputs, data):
         __E = 1e-8
         point_R, point_R_3, point_A, point_A_3, input_R_point_R_0, \
         d_f_R, d_f_A, d_p_R, d_p_R_3, d_p_A, \
         input_R, input_A, other = outputs
 
-        point_R_0 = other[0]
+        B = point_R.shape[0]
 
-        g_fake_loss = -torch.log(d_f_R+__E) -torch.log(d_p_R+__E) -torch.log(d_p_R_3+__E)
+        point_R_0 = other[0]
+        input_A_label = other[-1]
+        input_R_label = torch.zeros([B]).cuda().long()
+
+        g_fake_loss = self.calc_g_fake_loss(d_f_R) + self.calc_g_fake_loss(d_p_R) + self.calc_g_fake_loss(d_p_R_3)
 
         g_rsl, _, _ = self.cd(point_A, input_A)
         g_rsl_2, _, _ = self.cd(point_A_3, input_A)
@@ -222,19 +247,20 @@ class USSPALoss(BasicLoss):
 
         density_loss = self.density_loss(point_A) + self.density_loss(point_R)
 
-        loss_g = g_fake_loss + 1e2 * g_rsl + 1e2 * g_rsl_2 + 1e2 * g_fsl + 1e2 * g_fsl_2 + 1e2 * g_fsl_3 + 7.5 * density_loss
+        loss_g = g_fake_loss + 1e2 * g_rsl + 1e2 * g_rsl_2 + 1e2 * g_fsl + 1e2 * g_fsl_2 + 1e2 * g_fsl_3 + 1e1 * density_loss
 
-        d_fake_loss = -torch.log(1-d_f_R+__E) -torch.log(1-d_p_R+__E) -torch.log(1-d_p_R_3+__E)
-        d_real_loss = -torch.log(d_f_A+__E) -torch.log(d_p_A+__E)
+        d_fake_loss = self.class_loss(d_f_R, input_R_label) + self.class_loss(d_p_R, input_R_label) + self.class_loss(d_p_R_3, input_R_label)
+        d_real_loss = self.class_loss(d_f_A, input_A_label) + self.class_loss(d_p_A, input_A_label)
+
         loss_d = (d_real_loss+d_fake_loss)/2
 
         return [loss_g, loss_d, g_fake_loss, g_rsl_2, g_fsl_2, g_fsl_3, density_loss, d_fake_loss, d_real_loss]
 
 
-class USSPALoss_test(BasicLoss):
+class STALoss_test(BasicLoss):
     def __init__(self):
         super().__init__()
-        self.loss_name = ['cd', 'fcd_0p001', 'fcd_0p01', 'den_loss']
+        self.loss_name = ['cd', 'fcd_0p001', 'fcd_0p01', 'den_loss', 'acc']
         self.loss_num = len(self.loss_name)
         self.distance = ChamferDistance()
     
@@ -272,14 +298,19 @@ class USSPALoss_test(BasicLoss):
         input_R, input_A, other = outputs
 
         gt = data[0][1]
+        input_R_label = other[-2]
 
         cd = self.cd1(point_R_3, gt)
         fcd_0p001 = calc_fcd(point_R_3, gt, a=0.001)
         fcd_0p01 = calc_fcd(point_R_3, gt, a=0.01)
-        
+
         den_loss, mean = self.density_loss(point_R_3)
 
-        return [cd, fcd_0p001, fcd_0p01, den_loss]    
+        pre_label_3 = torch.argmax(d_p_R_3[:,1:])+1
+
+        acc = (input_R_label == pre_label_3).float()
+
+        return [cd, fcd_0p001, fcd_0p01, den_loss, acc]    
 
 if __name__ == '__main__':
-    model = USSPA()
+    model = STA()

@@ -16,7 +16,8 @@ from io_util import *
 
 import argparse
 
-from usspa_pcn import USSPA
+from sta_pcn import STA
+from types import SimpleNamespace
 
 
 def save_func(path, data, outputs, criterion, loss, time):
@@ -66,11 +67,17 @@ def save_func(path, data, outputs, criterion, loss, time):
 
 def test(args):
     valid_dataset = PCNGANDataset(args.lmdb_valid, args.lmdb_sn, args.input_pn, args.gt_pn, args.class_name)
-    net = USSPA()
+    cfg = SimpleNamespace()
+    cfg.model = SimpleNamespace(use_sta=bool(args.use_sta), use_sta_bias=bool(args.use_sta_bias))
+    cfg.sta = SimpleNamespace(k_mirror=args.sta_k_mirror, beta=args.sta_beta, temperature=args.sta_temperature)
+    cfg.loss_weights = SimpleNamespace(w_symp=args.w_symp, w_symg=args.w_symg)
+    cfg.train = SimpleNamespace(sta_ramp_epochs=args.sta_ramp_epochs)
+
+    net = STA(cfg=cfg)
 
     test_framework = TestFramework(args.log_dir, cuda_index)
     test_framework._set_dataset(args.lmdb_valid, valid_dataset)
-    test_framework._set_net(net, 'USSPA_PCN')
+    test_framework._set_net(net, 'STA_PCN')
     # test_framework.test(save_func, last_epoch=args.last_epoch, save_index=list(range(100)))
     test_framework.test(save_func, last_epoch=args.last_epoch)
 
@@ -82,11 +89,19 @@ if __name__ == '__main__':
     parser.add_argument('--lmdb_valid', default='/home/mcf/data/works/realcom/data/PCN/test')
     parser.add_argument('--lmdb_sn', default='/home/mcf/data/works/realcom/data/RealComShapeNetData/shapenet_data.lmdb')
     parser.add_argument('--class_name', default='chair', choices=['chair', 'table', 'cabinet', 'sofa', 'lamp'])
-    parser.add_argument('--log_dir', default='weights/usspa')
+    parser.add_argument('--log_dir', default='weights/STA')
 
     parser.add_argument('--input_pn', type=int, default=2048)
     parser.add_argument('--gt_pn', type=int, default=2048)
     parser.add_argument('--last_epoch', type=int, default=None)
+    parser.add_argument('--use_sta', type=int, default=0)
+    parser.add_argument('--use_sta_bias', type=int, default=1)
+    parser.add_argument('--sta_k_mirror', type=int, default=8)
+    parser.add_argument('--sta_beta', type=float, default=1.5)
+    parser.add_argument('--sta_temperature', type=float, default=0.07)
+    parser.add_argument('--w_symp', type=float, default=0.1)
+    parser.add_argument('--w_symg', type=float, default=0.1)
+    parser.add_argument('--sta_ramp_epochs', type=int, default=10)
     args = parser.parse_args()
     args.log_dir = os.path.join(args.log_dir, args.class_name)
     test(args)

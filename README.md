@@ -18,7 +18,7 @@ cd code/util/pointnet2\_ops\_lib
 
 python setup.py install
 
-```​:codex-file-citation\[codex-file-citation]{line\_range\_start=25 line\_range\_end=28 path=README.md git\_url="https://github.com/Senlllin/USSPA\_dg/blob/main/README.md#L25-L28"}​  
+```​:codex-file-citation\[codex-file-citation]{line\_range\_start=25 line\_range\_end=28 path=README.md git\_url="https://github.com/Senlllin/STA\_dg/blob/main/README.md#L25-L28"}​  
 
 
 
@@ -123,7 +123,7 @@ ShapeNet：[data_id, points]，同样重采样至 gt_pn
 
 推荐在仓库内新建目录 data/：
 
-USSPA_dg/
+STA_dg/
   data/
     RealComData/
       realcom_data_train.lmdb
