@@ -8,10 +8,12 @@ import torch.nn.functional as F
 
 
 '''
-basic shape:  [bs, feature_channel, point_num]
+基本形状:  [bs, feature_channel, point_num]
 '''
 
 class MlpConv(nn.Module):
+    """由多层卷积组成的简单 MLP"""
+
     def __init__(self, input_channel, channels, activation_function=None):
         super(MlpConv, self).__init__()
         self.layer_num = len(channels)
@@ -30,6 +32,8 @@ class MlpConv(nn.Module):
 
 
 class PcnEncoder(nn.Module):
+    """PCN 编码器"""
+
     def __init__(self, input_channel=3, out_c=1024):
         super(PcnEncoder, self).__init__()
         self.mlp_conv_1 = MlpConv(input_channel, [128, 256])
@@ -44,15 +48,17 @@ class PcnEncoder(nn.Module):
 
         x_max = torch.max(x, 2).values
         x_max = torch.unsqueeze(x_max, 2)
-        x_max = x_max.repeat(1, 1, point_num) 
+        x_max = x_max.repeat(1, 1, point_num)
         x = torch.cat([x, x_max], 1)
-        
+
         x = self.mlp_conv_2(x)
-        
+
         x_max = torch.max(x, 2).values
         return x_max
     
 class PcnEncoder2(nn.Module):
+    """输入为 [B,N,3] 的 PCN 编码器"""
+
     def __init__(self, input_channel=3, out_c=1024):
         super().__init__()
         self.mlp_conv_1 = MlpConv(input_channel, [128, 256])
@@ -67,23 +73,25 @@ class PcnEncoder2(nn.Module):
         x = self.mlp_conv_1(x)
 
         x_max = torch.max(x, 2, keepdim=True).values
-        x_max = x_max.repeat(1, 1, N) 
+        x_max = x_max.repeat(1, 1, N)
         x = torch.cat([x, x_max], 1)
-        
+
         x = self.mlp_conv_2(x)
-        
+
         x_max = torch.max(x, 2, keepdim=True).values
         return x_max
 
 
-class PcnDecoder(nn.Module): 
+class PcnDecoder(nn.Module):
+    """PCN 解码器"""
+
     def __init__(self):
         super(PcnDecoder, self).__init__()
         self.num_coarse = 1024
         self.grid_scale = 0.05
         self.grid_size = 4
         self.num_fine = (self.grid_size**2) * self.num_coarse
-        #self.mlp_conv_1 = MlpConv(1024, [1024, 1024, self.num_coarse*3])
+        # self.mlp_conv_1 = MlpConv(1024, [1024, 1024, self.num_coarse*3])
 
         coarse_lst = [1024, 1024, self.num_coarse*3]
         in_features = 1024
@@ -96,11 +104,11 @@ class PcnDecoder(nn.Module):
         self.mlp_conv_2 = MlpConv(1024+3+2, [512, 512, 3])
 
     def forward(self, x):
-        ### Decoder coarse
+        ### 粗解码 ###
         fd1 = self.mlp_1(x)
         coarse = fd1.view(-1, self.num_coarse, 3)
 
-        ### Folding
+        ### 折叠 ###
         g1 = torch.linspace(self.grid_scale*(-1), self.grid_scale, self.grid_size).cuda()
         g2 = torch.linspace(self.grid_scale*(-1), self.grid_scale, self.grid_size).cuda()
         grid = torch.meshgrid(g1, g2)
@@ -116,7 +124,9 @@ class PcnDecoder(nn.Module):
 
         return coarse, fine
 
-class PcnDecoder2(nn.Module): 
+class PcnDecoder2(nn.Module):
+    """可选粗点的 PCN 解码器"""
+
     def __init__(self, grid_size=4, has_coarse=False, num_coarse=None):
         super().__init__()
         self.grid_scale = 0.05
@@ -126,7 +136,7 @@ class PcnDecoder2(nn.Module):
         else:
             self.num_coarse = 1024
         self.num_fine = (self.grid_size**2) * self.num_coarse
-        #self.mlp_conv_1 = MlpConv(1024, [1024, 1024, self.num_coarse*3])
+        # self.mlp_conv_1 = MlpConv(1024, [1024, 1024, self.num_coarse*3])
         self.has_coarse = has_coarse
         if not self.has_coarse:
             coarse_lst = [1024, 1024, self.num_coarse*3]
@@ -140,13 +150,13 @@ class PcnDecoder2(nn.Module):
         self.mlp_conv_2 = MlpConv(1024+3+2, [512, 512, 3])
 
     def forward(self, x, coarse=None):
-        ### Decoder coarse
-        
-        if not self.has_coarse: 
+        ### 粗解码 ###
+
+        if not self.has_coarse:
             fd1 = self.mlp_1(x)
             coarse = fd1.view(-1, self.num_coarse, 3)
 
-        ### Folding
+        ### 折叠 ###
         g1 = torch.linspace(self.grid_scale*(-1), self.grid_scale, self.grid_size).cuda()
         g2 = torch.linspace(self.grid_scale*(-1), self.grid_scale, self.grid_size).cuda()
         grid = torch.meshgrid(g1, g2)
@@ -163,15 +173,17 @@ class PcnDecoder2(nn.Module):
         return coarse, fine
 
 class TopNetNode(nn.Module):
+    """TopNet 的节点模块"""
+
     def __init__(self, input_channel, append_channel, output_channel, output_num, activation_function=None):
         super(TopNetNode, self).__init__()
         self.append_channel = append_channel
-        self.output_channel = output_channel 
+        self.output_channel = output_channel
         self.output_num = output_num
         self.mlp_conv = MlpConv(input_channel+append_channel, [512, 256, 64, output_channel*output_num], activation_function=activation_function)
-    
+
     '''
-    append_x shape: [bs, feature_channel, 1]
+    append_x 形状: [bs, feature_channel, 1]
     '''
     def forward(self, x, append_x=None):
         batch_size = x.shape[0]
@@ -185,19 +197,21 @@ class TopNetNode(nn.Module):
 
 
 class TopNetDecoder(nn.Module):
+    """TopNet 解码器"""
+
     def __init__(self, input_channel, output_nums, get_all_res=False):
         super(TopNetDecoder, self).__init__()
         self.get_all_res = get_all_res
         self.topnet_node_0 = TopNetNode(input_channel, 0, 8, output_nums[0], activation_function=nn.Tanh())
         self.topnet_nodes = []
-        
+
         for output_num in output_nums[1:-1]:
             self.topnet_nodes.append(TopNetNode(8, input_channel, 8, output_num))
         self.topnet_nodes.append(TopNetNode(8, input_channel, 3, output_nums[-1]))
         self.topnet_nodes = nn.ModuleList(self.topnet_nodes)
 
     '''
-    x shape: [bs, feature_channel, 1] or [bs, feature_channel]
+    x 形状: [bs, feature_channel, 1] 或 [bs, feature_channel]
     '''
     def forward(self, x):
         node_res = []
@@ -220,8 +234,8 @@ class TopNetDecoder(nn.Module):
 
 def get_k_neighbor(points, k=8):
     '''
-    points: [B, N, 3]   Tensor
-    k:                  int
+    points: [B, N, 3]   张量
+    k:                  整数
     '''
     x = points
     x1 = x.unsqueeze(1)
@@ -231,14 +245,16 @@ def get_k_neighbor(points, k=8):
     return idx.int()
 
 class UpSampleModule(nn.Module):
+    """上采样模块"""
+
     def __init__(self, times=4, gf_c=128):
         super().__init__()
         BC = 128
         self.mlp1 = MlpConv(3+gf_c, [BC, BC])
         self.mlp2 = MlpConv(3+BC*2, [BC, BC])
         self.mlp3 = MlpConv(3+BC*2, [BC, 3*times])
-        self.times = times 
-    
+        self.times = times
+
     def forward(self, p, gf):
         '''
         p  : [B, N, 3]
@@ -256,9 +272,9 @@ class UpSampleModule(nn.Module):
         x = self.mlp2(x)
         x_max = torch.max(x, dim=2, keepdim=True).values.repeat([1, 1, N])
         x = torch.cat([p, x, x_max], 1)
-        x = self.mlp3(x) 
+        x = self.mlp3(x)
         p = p.repeat([1, self.times, 1])
-        p += x 
+        p += x
         p = p.permute(0, 2, 1).reshape([B, N*self.times, 3])
         return p
 
