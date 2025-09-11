@@ -1,7 +1,3 @@
-# STA
-
-This repository implements the **Symmetry-parameter Transformer Attention** (STA) model for point cloud completion.
-
 ## Requirements
 - CUDA 10.2 – 11.1
 - Python 3.7
@@ -12,8 +8,8 @@ This repository implements the **Symmetry-parameter Transformer Attention** (STA
 ```bash
 cd util/pointnet2_ops_lib
 python setup.py install
-```
 
+# STA
 ## Code Structure
 - `network/sta.py` – core generator and discriminator with STA head and losses.
 - `network/sta_pcn.py` – PCN variant of the STA model.
