@@ -8,6 +8,7 @@ if "CUDA_VISIBLE_DEVICES" not in os.environ:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from types import SimpleNamespace
 
 
 sys.path.append('../util')
@@ -20,9 +21,54 @@ from pointnet2_ops.pointnet2_utils import QueryAndGroup
 # from avg_shape_2.avg_shape_1 import Model as Model_WSLoss
 
 
-class USSPA_G(nn.Module):
-    def __init__(self):
+class _STAParamHead(nn.Module):
+    def __init__(self, in_dim: int, hidden: int = 256):
         super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.LayerNorm(hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU()
+        )
+        self.out = nn.Linear(hidden, 4)
+        self.conf = nn.Sequential(nn.Linear(hidden, 1), nn.Sigmoid())
+
+    def forward(self, g):
+        h = self.mlp(g)
+        n = F.normalize(h[...,:3], dim=-1)
+        d = h[...,3:].clamp(-2, 2)
+        a = self.conf(h)
+        return n, d, a
+
+
+def _sta_reflect_points(x, n, d):
+    t = (x * n.unsqueeze(1)).sum(-1, keepdim=True) + d.unsqueeze(1)
+    return x - 2.0 * t * n.unsqueeze(1)
+
+
+def _sta_bias(token_xyz, n, d, k=8, beta=1.5, temperature=0.07):
+    x_ref = _sta_reflect_points(token_xyz, n, d)
+    dist = torch.cdist(token_xyz, x_ref)
+    B, T = dist.shape[:2]
+    k = min(k, T)
+    idx = dist.topk(k=k, largest=False).indices
+    bias = dist.new_zeros(B, T, T)
+    b = torch.arange(B, device=dist.device)[:, None, None]
+    i = torch.arange(T, device=dist.device)[None, :, None]
+    bias[b, i, idx] = beta
+    return bias / temperature
+
+
+def _sta_losses(Y_pred, n, d, alpha, w_symp, w_symg, distance):
+    l_plane = (torch.linalg.norm(n, dim=-1) - 1.0).abs().mean()
+    Y_ref = _sta_reflect_points(Y_pred, n, d)
+    p2g, g2p = distance(Y_pred, Y_ref)
+    l_geo = (p2g.mean(1) + g2p.mean(1)).mean() * alpha.detach().mean()
+    return w_symp * l_plane + w_symg * l_geo
+
+
+class STA_G(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
         self.GPN = 512
         self.E_R = PcnEncoder2(out_c=512)
         self.E_A = PcnEncoder2(out_c=512)
@@ -91,6 +137,9 @@ class USSPA_G(nn.Module):
         B, N, _ = input_R.shape
 
         f_R_0 = self.E_R(input_R)
+        g = f_R_0.squeeze(-1)
+        self.sta_head = getattr(self, "sta_head", _STAParamHead(g.size(-1)))
+        n, d, alpha = self.sta_head(g)
         point_R_0 = self.D_R(f_R_0)
         point_R_0 = point_R_0.reshape([-1, self.GPN, 3])
 
@@ -112,11 +161,15 @@ class USSPA_G(nn.Module):
 
         x = self.upsampling_refine(x)
         point_R_3, point_A_3 = torch.split(x, [B, B], 0)
-        point_R_3 = self.mi_sam(point_R_3, ab)
 
         other = []
         other.append(point_R_0)
         other.append(input_R_M)
+        other.append(point_R_3)
+        other.append(n)
+        other.append(d)
+        other.append(alpha)
+
 
         return f_R, f_A, point_R, point_R_3, point_A, point_A_3, input_R_point_R_0, other
 
@@ -135,7 +188,7 @@ class PointDIS(nn.Module):
         return d_p
 
 
-class USSPA_D(nn.Module):
+class STA_D(nn.Module):
     def __init__(self):
         super().__init__()
         self.d_f = MlpConv(512, [64, 64, 1])
@@ -159,14 +212,20 @@ class USSPA_D(nn.Module):
         return d_f_R, d_f_A, d_p_R, d_p_R_3, d_p_A
 
 
-class USSPA(nn.Module):
-    def __init__(self, dis = 0.03):
+class STA(nn.Module):
+    def __init__(self, dis=0.03, cfg=None):
         super().__init__()
-        self.G = USSPA_G()
+        self.cfg = cfg if cfg is not None else SimpleNamespace(
+            model=SimpleNamespace(use_sta=False, use_sta_bias=True),
+            sta=SimpleNamespace(k_mirror=8, beta=1.5, temperature=0.07),
+            loss_weights=SimpleNamespace(w_symp=0.1, w_symg=0.1),
+            train=SimpleNamespace(sta_ramp_epochs=10)
+        )
+        self.G = STA_G(self.cfg)
 
-        self.D = USSPA_D()
-        self.loss = USSPALoss()
-        self.loss_test = USSPALoss_test()
+        self.D = STA_D()
+        self.loss = STALoss(self.cfg)
+        self.loss_test = STALoss_test()
     
     def forward(self, data):
         rc_data, sn_data = data
@@ -181,9 +240,10 @@ class USSPA(nn.Module):
             input_R, input_A, other
 
 
-class USSPALoss(BasicLoss):
-    def __init__(self):
+class STALoss(BasicLoss):
+    def __init__(self, cfg):
         super().__init__()
+        self.cfg = cfg
         self.loss_name = ['loss_g', 'loss_d', 'g_fake_loss', 'g_rsl_2', 'g_rsl_2', 'g_fsl_3', 'density_loss', 'd_fake_loss', 'd_real_loss']
         self.loss_num = len(self.loss_name)
         self.distance = ChamferDistance()
@@ -211,6 +271,7 @@ class USSPALoss(BasicLoss):
         input_R, input_A, other = outputs
 
         point_R_0 = other[0]
+        n, d, alpha = other[3], other[4], other[5]
 
         g_fake_loss = -torch.log(d_f_R+__E) -torch.log(d_p_R+__E) -torch.log(d_p_R_3+__E)
 
@@ -223,6 +284,8 @@ class USSPALoss(BasicLoss):
         density_loss = self.density_loss(point_A) + self.density_loss(point_R)
 
         loss_g = g_fake_loss + 1e2 * g_rsl + 1e2 * g_rsl_2 + 1e2 * g_fsl + 1e2 * g_fsl_2 + 1e2 * g_fsl_3 + 7.5 * density_loss
+        if self.cfg.model.use_sta:
+            loss_g = loss_g + _sta_losses(point_R_3, n, d, alpha, self.cfg.loss_weights.w_symp, self.cfg.loss_weights.w_symg, self.distance)
 
         d_fake_loss = -torch.log(1-d_f_R+__E) -torch.log(1-d_p_R+__E) -torch.log(1-d_p_R_3+__E)
         d_real_loss = -torch.log(d_f_A+__E) -torch.log(d_p_A+__E)
@@ -231,7 +294,7 @@ class USSPALoss(BasicLoss):
         return [loss_g, loss_d, g_fake_loss, g_rsl_2, g_fsl_2, g_fsl_3, density_loss, d_fake_loss, d_real_loss]
 
 
-class USSPALoss_test(BasicLoss):
+class STALoss_test(BasicLoss):
     def __init__(self):
         super().__init__()
         self.loss_name = ['cd', 'fcd_0p001', 'fcd_0p01', 'den_loss']
@@ -282,4 +345,4 @@ class USSPALoss_test(BasicLoss):
         return [cd, fcd_0p001, fcd_0p01, den_loss]    
 
 if __name__ == '__main__':
-    model = USSPA()
+    model = STA()

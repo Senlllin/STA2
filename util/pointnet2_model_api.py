@@ -2,11 +2,29 @@ import os
 
 os.environ["CUDA_VISIBLE_DEVICES"] = '1'
 
-import torch.nn as nn 
-import torch 
+import torch.nn as nn
+import torch
 import torch.nn.functional as F
 from pointnet2_modules import PointnetSAModuleMSG, PointnetSAModule, PointnetFPModule, FPS, FPS2, group, three_nn, three_interpolate, PointnetSAModule_test
 from base_model_util import MlpConv
+
+
+def _sta_reflect_points(x, n, d):
+    t = (x * n.unsqueeze(1)).sum(-1, keepdim=True) + d.unsqueeze(1)
+    return x - 2.0 * t * n.unsqueeze(1)
+
+
+def _sta_bias(token_xyz, n, d, k=8, beta=1.5, temperature=0.07):
+    x_ref = _sta_reflect_points(token_xyz, n, d)
+    dist = torch.cdist(token_xyz, x_ref)
+    B, T = dist.shape[:2]
+    k = min(k, T)
+    idx = dist.topk(k=k, largest=False).indices
+    bias = dist.new_zeros(B, T, T)
+    b = torch.arange(B, device=dist.device)[:, None, None]
+    i = torch.arange(T, device=dist.device)[None, :, None]
+    bias[b, i, idx] = beta
+    return bias / temperature
 
 
 class basic_conv1d_seq(nn.Module):
@@ -299,7 +317,7 @@ class PointConvAttention(nn.Module):
         self.weight_mlp = MlpConv(input_channel_num*k, [128, 128, k])
         #self.attention_mlp = MlpConv(input_channel_num+1, [256, input_channel_num])
 
-    def forward(self, feature, idx, append_feature=None):
+    def forward(self, feature, idx, append_feature=None, token_xyz=None, n=None, d=None, cfg=None):
         '''
         feature:    [B, C, N] Tensor
         idx:        [B, N, K] int Tensor
@@ -307,14 +325,17 @@ class PointConvAttention(nn.Module):
         '''
         B, C, N = feature.shape
         feature = feature.contiguous()
-        idx = idx[:,:,:self.k].contiguous()
+        idx = idx[:, :, :self.k].contiguous()
         grouped_feature = group(feature, idx)
         grouped_feature = grouped_feature.permute(0, 2, 3, 1)
         grouped_feature_n = grouped_feature
         grouped_feature = grouped_feature.reshape(B, N, -1).permute(0, 2, 1)
 
-        weight = self.weight_mlp(grouped_feature).permute(0, 2, 1).unsqueeze(3)
-        weight = F.softmax(weight, 2)
+        attn_logits = self.weight_mlp(grouped_feature).permute(0, 2, 1).unsqueeze(3)
+        if cfg is not None and getattr(cfg.model, 'use_sta', False) and getattr(cfg.model, 'use_sta_bias', True) and token_xyz is not None and n is not None and d is not None:
+            B_sym = _sta_bias(token_xyz, n, d, k=cfg.sta.k_mirror, beta=cfg.sta.beta, temperature=cfg.sta.temperature)
+            attn_logits = attn_logits + B_sym.unsqueeze(-1)
+        weight = F.softmax(attn_logits, 2)
 
         grouped_feature_n = grouped_feature_n*weight
         grouped_feature_n = grouped_feature_n.reshape(B, N, -1).permute(0, 2, 1)
