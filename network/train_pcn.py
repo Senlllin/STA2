@@ -41,9 +41,9 @@ def train(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     
-    parser.add_argument('--lmdb_train', default='/home/mcf/data/works/realcom/data/PCN/train')
-    parser.add_argument('--lmdb_valid', default='/home/mcf/data/works/realcom/data/PCN/test')
-    parser.add_argument('--lmdb_sn', default='/home/mcf/data/works/realcom/data/RealComShapeNetData/shapenet_data.lmdb')
+    parser.add_argument('--lmdb_train', default='/home/STA2/data/PCN/train')
+    parser.add_argument('--lmdb_valid', default='/home/STA2/data/PCN/test')
+    parser.add_argument('--lmdb_sn', default='/home/STA2/data/RealComShapeNetData/shapenet_data.lmdb')
 
     parser.add_argument('--class_name', default='chair', choices=['chair', 'table', 'cabinet', 'sofa', 'lamp'])
 
