@@ -76,9 +76,9 @@ def test(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--lmdb_train', default='/home/mcf/data/works/realcom/data/RealComData/realcom_data_train.lmdb')
-    parser.add_argument('--lmdb_valid', default='/home/mcf/data/works/realcom/data/RealComData/realcom_data_test.lmdb')
-    parser.add_argument('--lmdb_sn', default='/home/mcf/data/works/realcom/data/RealComShapeNetData/shapenet_data.lmdb')
+    parser.add_argument('--lmdb_train', default='/home/STA2/data/RealComData/realcom_data_train.lmdb')
+    parser.add_argument('--lmdb_valid', default='/home/STA2/data/RealComData/realcom_data_test.lmdb')
+    parser.add_argument('--lmdb_sn', default='/home/STA2/data/RealComShapeNetData/shapenet_data.lmdb')
     parser.add_argument('--class_name', default='all')
     parser.add_argument('--log_dir', default='weights/STA_classifier')
 
