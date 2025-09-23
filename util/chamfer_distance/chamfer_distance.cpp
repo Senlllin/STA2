@@ -1,5 +1,6 @@
 #include <torch/torch.h>
 
+#if defined(WITH_CUDA) && WITH_CUDA
 // CUDA forward declarations
 int ChamferDistanceKernelLauncher(
     const int b, const int n,
@@ -25,12 +26,12 @@ int ChamferDistanceGradKernelLauncher(
 
 
 void chamfer_distance_forward_cuda(
-    const at::Tensor xyz1, 
-    const at::Tensor xyz2, 
-    const at::Tensor dist1, 
-    const at::Tensor dist2, 
-    const at::Tensor idx1, 
-    const at::Tensor idx2) 
+    const at::Tensor xyz1,
+    const at::Tensor xyz2,
+    const at::Tensor dist1,
+    const at::Tensor dist2,
+    const at::Tensor idx1,
+    const at::Tensor idx2)
 {
     ChamferDistanceKernelLauncher(xyz1.size(0), xyz1.size(1), xyz1.data<float>(),
                                             xyz2.size(1), xyz2.data<float>(),
@@ -40,12 +41,12 @@ void chamfer_distance_forward_cuda(
 
 void chamfer_distance_backward_cuda(
     const at::Tensor xyz1,
-    const at::Tensor xyz2, 
-    at::Tensor gradxyz1, 
-    at::Tensor gradxyz2, 
-    at::Tensor graddist1, 
-    at::Tensor graddist2, 
-    at::Tensor idx1, 
+    const at::Tensor xyz2,
+    at::Tensor gradxyz1,
+    at::Tensor gradxyz2,
+    at::Tensor graddist1,
+    at::Tensor graddist2,
+    at::Tensor idx1,
     at::Tensor idx2)
 {
     ChamferDistanceGradKernelLauncher(xyz1.size(0), xyz1.size(1), xyz1.data<float>(),
@@ -54,6 +55,31 @@ void chamfer_distance_backward_cuda(
                                            graddist2.data<float>(), idx2.data<int>(),
                                            gradxyz1.data<float>(), gradxyz2.data<float>());
 }
+#else
+void chamfer_distance_forward_cuda(
+    const at::Tensor /*xyz1*/,
+    const at::Tensor /*xyz2*/,
+    const at::Tensor /*dist1*/,
+    const at::Tensor /*dist2*/,
+    const at::Tensor /*idx1*/,
+    const at::Tensor /*idx2*/)
+{
+    AT_ERROR("ChamferDistance not compiled with CUDA");
+}
+
+void chamfer_distance_backward_cuda(
+    const at::Tensor /*xyz1*/,
+    const at::Tensor /*xyz2*/,
+    at::Tensor /*gradxyz1*/,
+    at::Tensor /*gradxyz2*/,
+    at::Tensor /*graddist1*/,
+    at::Tensor /*graddist2*/,
+    at::Tensor /*idx1*/,
+    at::Tensor /*idx2*/)
+{
+    AT_ERROR("ChamferDistance not compiled with CUDA");
+}
+#endif
 
 
 void nnsearch(

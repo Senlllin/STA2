@@ -2,20 +2,55 @@ import os
 #os.environ["TORCH_CUDA_ARCH_LIST"] = '7.0'
 import sys
 
+import warnings
+
 import torch
 
-from torch.utils.cpp_extension import load
+from torch.utils.cpp_extension import CUDA_HOME, load
+
+
+def _cuda_build_available():
+    """Return whether the CUDA extension should be built."""
+    if not torch.cuda.is_available():
+        return False
+    if torch.version.cuda is None:
+        return False
+    if os.environ.get("CUDA_HOME") is None and CUDA_HOME is None:
+        return False
+    return True
+
 
 current_path = os.path.abspath(__file__)
 dir_path = os.path.dirname(current_path)
 cpp_file = os.path.join(dir_path, 'chamfer_distance.cpp')
 cu_file = os.path.join(dir_path, 'chamfer_distance.cu')
-'''
-cd = load(name="cd",
-          sources=["chamfer_distance/chamfer_distance.cpp",
-                   "chamfer_distance/chamfer_distance.cu"])
-'''
-cd = load(name='cd', sources=[cpp_file, cu_file])
+
+
+sources = [cpp_file]
+extra_cflags = ['-DWITH_CUDA=0']
+extra_cuda_cflags = None
+
+if _cuda_build_available():
+    sources.append(cu_file)
+    extra_cflags = ['-DWITH_CUDA=1']
+    extra_cuda_cflags = ['-DWITH_CUDA=1']
+else:
+    warnings.warn(
+        "CUDA build for ChamferDistance is not available. "
+        "Falling back to CPU-only implementation.",
+        RuntimeWarning,
+    )
+
+load_kwargs = {
+    'name': 'cd',
+    'sources': sources,
+    'extra_cflags': extra_cflags,
+}
+
+if extra_cuda_cflags is not None:
+    load_kwargs['extra_cuda_cflags'] = extra_cuda_cflags
+
+cd = load(**load_kwargs)
 
 class ChamferDistanceFunction(torch.autograd.Function):
     @staticmethod
